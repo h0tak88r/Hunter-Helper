@@ -2,7 +2,7 @@
 
 **Hunter Helper** is a Burp Suite extension designed to streamline the workflow of bug hunters and pentesters. It provides a suite of tools for rapid request conversion, POC generation, and beautiful, shareable request/response visualization.
 
-## 🚀 Features
+## Features
 
 ### 1. Smart Sharing (Copy as Image)
 Generate beautiful, syntax-highlighted images of your HTTP requests and responses directly to your clipboard. Perfect for reports, write-ups, or sharing with the team.
@@ -22,7 +22,7 @@ Easily convert your requests between common formats with a single click.
 ### 3. POC Generation
 -   **Copy as fetch() POC**: Generates a clean, ready-to-run JavaScript `fetch` code snippet for the selected request. Handles headers, body, and credentials automatically.
 
-## 📦 Installation
+## Installation
 
 1.  **Prerequisites**: Ensure you have **Jython** configured in Burp Suite.
     -   Download [Jython Standalone JAR](https://www.jython.org/download).
@@ -35,7 +35,7 @@ Easily convert your requests between common formats with a single click.
     -   **Extension File**: Select `hunter_helper.py`.
 3.  **Verify**: You should see "Hunter Helper - Loaded Successfully" in the Output tab.
 
-## 🛠️ Usage
+## Usage
 
 1.  **Right-click** on any HTTP request in the **Proxy History** or **Repeater**.
 2.  Navigate to the **Hunter Helper** context menu.
@@ -43,6 +43,3 @@ Easily convert your requests between common formats with a single click.
     -   *Copy as image*
     -   *Convert to JSON/XML/etc.*
     -   *Copy as fetch POC*
-
-## 📝 License
-MIT License
