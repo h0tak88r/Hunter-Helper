@@ -13,8 +13,11 @@ from javax.swing.border import EmptyBorder
 import json
 import urllib
 import sys
+import re
+import base64
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+from java.io import File, FileWriter
 
 class BurpExtender(IBurpExtender, IContextMenuFactory):
     
@@ -59,9 +62,585 @@ class BurpExtender(IBurpExtender, IContextMenuFactory):
         menu_items.append(JMenuItem("Convert JSON to GET Request", actionPerformed=lambda x: self.convert_to_get(invocation)))
         menu_items.append(JMenuItem("Copy as fetch POC", actionPerformed=lambda x: self.copy_as_fetch_poc(invocation)))
         menu_items.append(JMenuItem("Copy as image", actionPerformed=lambda x: self.copy_as_image(invocation)))
+        menu_items.append(JMenuItem("Copy Session Headers", actionPerformed=lambda x: self.copy_session_headers(invocation)))
+        menu_items.append(JMenuItem("Decode JWT", actionPerformed=lambda x: self.decode_jwt(invocation)))
+        menu_items.append(JMenuItem("Copy as Markdown", actionPerformed=lambda x: self.copy_as_markdown(invocation)))
+        menu_items.append(JMenuItem("Copy as CSRF HTML POC", actionPerformed=lambda x: self.copy_as_csrf_poc(invocation)))
+        menu_items.append(JMenuItem("Test CSRF POC in Browser", actionPerformed=lambda x: self.test_csrf_in_browser(invocation)))
         
         return menu_items
+
+    def copy_session_headers(self, invocation):
+        """Extract and copy session-related headers to clipboard"""
+        try:
+            request_response = invocation.getSelectedMessages()[0]
+            request = request_response.getRequest()
+            request_info = self._helpers.analyzeRequest(request)
+            headers = request_info.getHeaders()
+            
+            # List of session/auth/csrf headers to look for (lowercase for matching)
+            target_headers = [
+                'authorization', 'proxy-authorization', 'cookie', 'set-cookie',
+                'x-auth-token', 'session-id', 'x-session-id',
+                'x-csrf-token', 'x-xsrf-token', 'x-csrftoken', 'x-xsrftoken',
+                'x-request-verification-token', 'request-verification-token',
+                'anti-forgery-token', 'x-anti-forgery-token'
+            ]
+            
+            extracted_headers = []
+            
+            # Iterate and find matches
+            for header in headers:
+                if ':' in header:
+                    name, value = header.split(':', 1)
+                    name_clean = name.strip().lower()
+                    
+                    if name_clean in target_headers:
+                        extracted_headers.append(header)
+            
+            if not extracted_headers:
+                print("[-] No session headers found in the selected request.")
+                return
+
+            # Join with newlines
+            clipboard_content = '\n'.join(extracted_headers)
+            
+            # Copy to clipboard
+            toolkit = Toolkit.getDefaultToolkit()
+            clipboard = toolkit.getSystemClipboard()
+            selection = StringSelection(clipboard_content)
+            clipboard.setContents(selection, selection)
+            
+            print("[+] Copied {} session headers to clipboard!".format(len(extracted_headers)))
+            
+        except Exception as e:
+            print("[-] Error copying session headers: " + str(e))
+            import traceback
+            traceback.print_exc()
+
+    def decode_jwt(self, invocation):
+        """Decode JWT tokens and provide security recommendations"""
+        try:
+            request_response = invocation.getSelectedMessages()[0]
+            request = request_response.getRequest()
+            response = request_response.getResponse()
+            
+            request_info = self._helpers.analyzeRequest(request)
+            headers = request_info.getHeaders()
+            body_offset = request_info.getBodyOffset()
+            req_body_bytes = request[body_offset:].tostring()
+            # Decode with error handling for non-ASCII characters
+            try:
+                req_body = req_body_bytes.decode('utf-8', 'replace')
+            except:
+                req_body = req_body_bytes
+            
+            # Also check response if present
+            resp_body = ""
+            if response:
+                resp_info = self._helpers.analyzeResponse(response)
+                resp_body_offset = resp_info.getBodyOffset()
+                resp_body_bytes = response[resp_body_offset:].tostring()
+                # Decode with error handling for non-ASCII characters
+                try:
+                    resp_body = resp_body_bytes.decode('utf-8', 'replace')
+                except:
+                    resp_body = resp_body_bytes
+            
+            # JWT pattern: xxx.yyy.zzz (base64url segments)
+            jwt_pattern = r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*'
+            
+            found_jwts = []
+            
+            # Search in headers
+            for header in headers:
+                if ':' in header:
+                    name, value = header.split(':', 1)
+                    matches = re.findall(jwt_pattern, value)
+                    for match in matches:
+                        found_jwts.append(('Header: ' + name.strip(), match))
+            
+            # Search in request body
+            req_matches = re.findall(jwt_pattern, req_body)
+            for match in req_matches:
+                found_jwts.append(('Request Body', match))
+            
+            # Search in response body
+            resp_matches = re.findall(jwt_pattern, resp_body)
+            for match in resp_matches:
+                found_jwts.append(('Response Body', match))
+            
+            if not found_jwts:
+                print("[-] No JWT tokens found in the request/response.")
+                return
+            
+            print("\n" + "="*60)
+            print("JWT DECODER - Security Analysis")
+            print("="*60 + "\n")
+            
+            for idx, (location, jwt_token) in enumerate(found_jwts):
+                print("[+] JWT #{} found in: {}".format(idx + 1, location))
+                print("-" * 60)
+                
+                try:
+                    # Decode JWT
+                    parts = jwt_token.split('.')
+                    if len(parts) < 2:
+                        print("[-] Invalid JWT format\n")
+                        continue
+                    
+                    # Decode header
+                    header_decoded = self._base64url_decode(parts[0])
+                    header_json = json.loads(header_decoded)
+                    
+                    # Decode payload
+                    payload_decoded = self._base64url_decode(parts[1])
+                    payload_json = json.loads(payload_decoded)
+                    
+                    # Print decoded values
+                    print("\nHeader:")
+                    print(json.dumps(header_json, indent=2))
+                    
+                    print("\nPayload:")
+                    print(json.dumps(payload_json, indent=2))
+                    
+                    # Security Analysis
+                    print("\n" + "="*60)
+                    print("SECURITY RECOMMENDATIONS:")
+                    print("="*60)
+                    
+                    alg = header_json.get('alg', 'unknown').upper()
+                    
+                    if alg == 'NONE':
+                        print("\n[!!! CRITICAL !!!]")
+                        print("Algorithm: 'none' detected!")
+                        print("Attack: Try removing the signature portion of the JWT.")
+                        print("Example: Just send 'header.payload.' (keep the trailing dot)")
+                        
+                    elif alg in ['HS256', 'HS384', 'HS512']:
+                        print("\n[!! WARNING !!]")
+                        print("Algorithm: {} (Symmetric HMAC)".format(alg))
+                        print("Attack 1: Brute force the secret key using a wordlist.")
+                        print("Tools: hashcat, jwt_tool, john the ripper")
+                        print("Attack 2: Try weak secrets like 'secret', 'password', etc.")
+                        
+                    elif alg in ['RS256', 'RS384', 'RS512', 'PS256', 'PS384', 'PS512']:
+                        print("\n[! INFO !]")
+                        print("Algorithm: {} (Asymmetric RSA/PSS)".format(alg))
+                        print("Attack: Algorithm confusion (RS256 -> HS256)")
+                        print("Description: Try changing 'alg' to 'HS256' and sign with the")
+                        print("             public key (treated as symmetric secret).")
+                        
+                    elif alg in ['ES256', 'ES384', 'ES512']:
+                        print("\n[! INFO !]")
+                        print("Algorithm: {} (Asymmetric ECDSA)".format(alg))
+                        print("Attack: Algorithm confusion or key confusion attacks may apply.")
+                    
+                    else:
+                        print("\n[! INFO !]")
+                        print("Algorithm: {} (Unknown/Custom)".format(alg))
+                        print("Manual analysis recommended.")
+                    
+                    # Check expiration
+                    if 'exp' in payload_json:
+                        import time
+                        exp_time = payload_json['exp']
+                        current_time = int(time.time())
+                        
+                        if exp_time < current_time:
+                            print("\n[! EXPIRED !]")
+                            print("Token expired at: {}".format(exp_time))
+                        else:
+                            print("\n[OK] Token valid until: {}".format(exp_time))
+                    else:
+                        print("\n[! WARNING !] No expiration claim (exp) found.")
+                        print("Token might be valid indefinitely!")
+                    
+                    # Check standard claims
+                    print("\n" + "-"*60)
+                    print("Standard Claims:")
+                    for claim in ['sub', 'iss', 'aud', 'iat', 'nbf']:
+                        if claim in payload_json:
+                            print("  {}: {}".format(claim, payload_json[claim]))
+                    
+                    print("\n" + "="*60 + "\n")
+                    
+                except Exception as decode_error:
+                    print("[-] Error decoding JWT: " + str(decode_error))
+                    print("\n")
+            
+        except Exception as e:
+            print("[-] Error in JWT decoder: " + str(e))
+            import traceback
+            traceback.print_exc()
     
+    def copy_as_markdown(self, invocation):
+        """Copy request/response as markdown with smart header filtering"""
+        print("[DEBUG] copy_as_markdown called")
+        try:
+            request_response = invocation.getSelectedMessages()[0]
+            request = request_response.getRequest()
+            response = request_response.getResponse()
+            
+            # Analyze request
+            request_info = self._helpers.analyzeRequest(request)
+            req_body_offset = request_info.getBodyOffset()
+            req_body_bytes = request[req_body_offset:].tostring()
+            # Decode with error handling for non-ASCII characters
+            try:
+                req_body = req_body_bytes.decode('utf-8', 'replace')
+            except:
+                req_body = req_body_bytes
+            req_headers = request_info.getHeaders()
+            
+            # Analyze response (if present)
+            resp_headers = []
+            resp_body = ""
+            if response:
+                resp_info = self._helpers.analyzeResponse(response)
+                resp_body_offset = resp_info.getBodyOffset()
+                resp_body_bytes = response[resp_body_offset:].tostring()
+                # Decode with error handling for non-ASCII characters
+                try:
+                    resp_body = resp_body_bytes.decode('utf-8', 'replace')
+                except:
+                    resp_body = resp_body_bytes
+                resp_headers = resp_info.getHeaders()
+            
+            # Sensitive headers to censor
+            SENSITIVE_HEADERS = ['cookie', 'authorization', 'set-cookie', 'x-auth-token', 'session-id', 'sessionid']
+            
+            # Noise headers to filter out
+            NOISE_HEADERS = [
+                'connection', 'content-length', 'date', 'keep-alive', 'vary', 'server', 'etag', 
+                'cache-control', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
+                'upgrade-insecure-requests', 'accept-language', 'accept-encoding', 
+                'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'sec-fetch-user',
+                'pragma', 'expires', 'last-modified', 'x-powered-by', 'x-aspnet-version',
+                'content-security-policy', 'x-xss-protection', 'x-ua-compatible', 'referrer-policy',
+                'strict-transport-security', 'x-content-type-options',
+                'via', 'cf-cache-status', 'cf-ray'
+            ]
+            
+            markdown_lines = []
+            markdown_lines.append("Request")
+            markdown_lines.append("```http")
+            
+            # Request first line
+            if req_headers and len(req_headers) > 0:
+                markdown_lines.append(req_headers[0])
+                
+                # Request headers (filtered)
+                for h in req_headers[1:]:
+                    if ':' in h:
+                        k, v = h.split(':', 1)
+                        k_clean = k.strip()
+                        v_clean = v.strip()
+                        k_lower = k_clean.lower()
+                        
+                        # Skip noise headers
+                        if k_lower in NOISE_HEADERS:
+                            continue
+                        
+                        # Censor sensitive headers
+                        if k_lower in SENSITIVE_HEADERS:
+                            v_clean = "********"
+                        
+                        markdown_lines.append("{}: {}".format(k_clean, v_clean))
+            
+            # Request body
+            if req_body:
+                markdown_lines.append("")
+                markdown_lines.append(req_body)
+            
+            markdown_lines.append("```")
+            markdown_lines.append("")
+            
+            # Response section
+            if resp_headers:
+                markdown_lines.append("Response")
+                markdown_lines.append("```http")
+                
+                # Response status line
+                if len(resp_headers) > 0:
+                    markdown_lines.append(resp_headers[0])
+                    
+                    # Response headers (filtered)
+                    for h in resp_headers[1:]:
+                        if ':' in h:
+                            k, v = h.split(':', 1)
+                            k_clean = k.strip()
+                            v_clean = v.strip()
+                            k_lower = k_clean.lower()
+                            
+                            # Skip noise headers
+                            if k_lower in NOISE_HEADERS:
+                                continue
+                            
+                            # Censor sensitive headers
+                            if k_lower in SENSITIVE_HEADERS:
+                                v_clean = "********"
+                            
+                            markdown_lines.append("{}: {}".format(k_clean, v_clean))
+                
+                # Response body
+                if resp_body:
+                    markdown_lines.append("")
+                    markdown_lines.append(resp_body)
+                
+                markdown_lines.append("```")
+            
+            # Join and copy to clipboard
+            markdown_content = '\n'.join(markdown_lines)
+            
+            # Print Markdown to output for easy copying
+            print("\n" + "="*60)
+            print("Markdown Output - Copy the content below:")
+            print("="*60)
+            print(markdown_content)
+            print("="*60 + "\n")
+            
+            # Try to copy to clipboard (may fail on some systems)
+            try:
+                toolkit = Toolkit.getDefaultToolkit()
+                clipboard = toolkit.getSystemClipboard()
+                selection = StringSelection(markdown_content)
+                clipboard.setContents(selection, selection)
+                print("[+] Also copied to clipboard!")
+            except Exception as clipboard_error:
+                print("[-] Clipboard copy failed: " + str(clipboard_error))
+                print("[+] Please copy the Markdown from the output above")
+            
+        except Exception as e:
+            print("[-] Error copying as markdown: " + str(e))
+            import traceback
+            traceback.print_exc()
+
+    def copy_as_csrf_poc(self, invocation):
+        """Generate CSRF HTML POC and copy to clipboard"""
+        print("[DEBUG] copy_as_csrf_poc called")
+        try:
+            print("[DEBUG] Getting request...")
+            request_response = invocation.getSelectedMessages()[0]
+            request = request_response.getRequest()
+            http_service = request_response.getHttpService()
+            request_info = self._helpers.analyzeRequest(http_service, request)
+            
+            print("[DEBUG] Extracting method and URL...")
+            # Get method and URL
+            method = request_info.getMethod()
+            url = request_info.getUrl().toString()
+            
+            print("[DEBUG] Method: " + method + ", URL: " + url)
+            
+            # Get parameters
+            parameters = request_info.getParameters()
+            print("[DEBUG] Found " + str(len(parameters)) + " parameters")
+            
+            # Determine encoding type
+            content_type = request_info.getContentType()
+            enctype = ""
+            if content_type == 2:  # MULTIPART
+                enctype = ' enctype="multipart/form-data"'
+            
+            print("[DEBUG] Building HTML POC...")
+            # Build HTML POC
+            html_lines = []
+            html_lines.append("<!DOCTYPE html>")
+            html_lines.append("<html>")
+            html_lines.append("  <!-- CSRF PoC - Hunter Helper -->")
+            html_lines.append("  <body>")
+            html_lines.append('    <form method="{}" action="{}"{}>'.format(method, self._escape_html(url), enctype))
+            
+            # Add input fields for parameters
+            for param in parameters:
+                try:
+                    param_type = param.getType()
+                    
+                    # Skip URL parameters if method is POST (they're already in the action URL)
+                    if method.upper() == "POST" and param_type == 0:  # URL parameter
+                        continue
+                    
+                    # Skip cookies - browsers send them automatically
+                    if param_type == 2:  # Cookie parameter
+                        continue
+                    
+                    # Get parameter name and value, handle unicode properly
+                    param_name = param.getName()
+                    param_value = param.getValue()
+                    
+                    # Convert to string and handle unicode
+                    if isinstance(param_name, unicode):
+                        name = param_name.encode('utf-8', 'replace')
+                    else:
+                        name = str(param_name)
+                    
+                    if isinstance(param_value, unicode):
+                        value = param_value.encode('utf-8', 'replace')
+                    else:
+                        value = str(param_value)
+                    
+                    # Escape HTML entities
+                    name = self._escape_html(name)
+                    value = self._escape_html(value)
+                    
+                    html_lines.append('      <input type="text" name="{}" value="{}">'.format(name, value))
+                except Exception as param_error:
+                    # Skip problematic parameters
+                    print("[-] Warning: Skipped parameter due to encoding issue: " + str(param_error))
+                    continue
+            
+            html_lines.append('      <input type="submit" value="Submit Request">')
+            html_lines.append('    </form>')
+            html_lines.append('    <script>')
+            html_lines.append('      document.forms[0].submit();')
+            html_lines.append('    </script>')
+            html_lines.append('  </body>')
+            html_lines.append('</html>')
+            
+            print("[DEBUG] Joining HTML lines...")
+            # Join and copy to clipboard
+            html_poc = '\n'.join(html_lines)
+            
+            print("[DEBUG] HTML POC generated, length: " + str(len(html_poc)))
+            
+            # Print POC to output for easy copying
+            print("\n" + "="*60)
+            print("CSRF HTML POC - Copy the content below:")
+            print("="*60)
+            print(html_poc)
+            print("="*60 + "\n")
+            
+            # Try to copy to clipboard (may fail on some systems)
+            try:
+                print("[DEBUG] Copying to clipboard...")
+                toolkit = Toolkit.getDefaultToolkit()
+                clipboard = toolkit.getSystemClipboard()
+                selection = StringSelection(html_poc)
+                clipboard.setContents(selection, selection)
+                print("[+] Also copied to clipboard!")
+            except Exception as clipboard_error:
+                print("[-] Clipboard copy failed: " + str(clipboard_error))
+                print("[+] Please copy the POC from the output above")
+            
+            print("[+] Save as .html file and open in browser to test")
+            
+        except Exception as e:
+            print("[-] Error generating CSRF POC: " + str(e))
+            import traceback
+            traceback.print_exc()
+
+    def test_csrf_in_browser(self, invocation):
+        """Generate CSRF HTML POC, save to temp file, and copy file:/// URL to clipboard"""
+        print("[DEBUG] test_csrf_in_browser called")
+        try:
+            request_response = invocation.getSelectedMessages()[0]
+            request = request_response.getRequest()
+            http_service = request_response.getHttpService()
+            request_info = self._helpers.analyzeRequest(http_service, request)
+            
+            # Get method and URL
+            method = request_info.getMethod()
+            url = request_info.getUrl().toString()
+            
+            # Get parameters
+            parameters = request_info.getParameters()
+            
+            # Determine encoding type
+            content_type = request_info.getContentType()
+            enctype = ""
+            if content_type == 2:  # MULTIPART
+                enctype = ' enctype="multipart/form-data"'
+            
+            # Build HTML POC (same as copy_as_csrf_poc)
+            html_lines = []
+            html_lines.append("<!DOCTYPE html>")
+            html_lines.append("<html>")
+            html_lines.append("  <!-- CSRF PoC - Hunter Helper -->")
+            html_lines.append("  <body>")
+            html_lines.append('    <form method="{}" action="{}"{}>'.format(method, self._escape_html(url), enctype))
+            
+            # Add input fields for parameters
+            for param in parameters:
+                try:
+                    param_type = param.getType()
+                    
+                    # Skip URL parameters if method is POST (they're already in the action URL)
+                    if method.upper() == "POST" and param_type == 0:  # URL parameter
+                        continue
+                    
+                    # Skip cookies - browsers send them automatically
+                    if param_type == 2:  # Cookie parameter
+                        continue
+                    
+                    # Get parameter name and value, handle unicode properly
+                    param_name = param.getName()
+                    param_value = param.getValue()
+                    
+                    # Convert to string and handle unicode
+                    if isinstance(param_name, unicode):
+                        name = param_name.encode('utf-8', 'replace')
+                    else:
+                        name = str(param_name)
+                    
+                    if isinstance(param_value, unicode):
+                        value = param_value.encode('utf-8', 'replace')
+                    else:
+                        value = str(param_value)
+                    
+                    # Escape HTML entities
+                    name = self._escape_html(name)
+                    value = self._escape_html(value)
+                    
+                    html_lines.append('      <input type="text" name="{}" value="{}">'.format(name, value))
+                except Exception as param_error:
+                    # Skip problematic parameters
+                    print("[-] Warning: Skipped parameter due to encoding issue: " + str(param_error))
+                    continue
+            
+            html_lines.append('      <input type="submit" value="Submit Request">')
+            html_lines.append('    </form>')
+            html_lines.append('    <script>')
+            html_lines.append('      document.forms[0].submit();')
+            html_lines.append('    </script>')
+            html_lines.append('  </body>')
+            html_lines.append('</html>')
+            
+            # Join HTML
+            html_poc = '\n'.join(html_lines)
+            
+            # Create temporary file
+            temp_file = File.createTempFile("csrf_poc_", ".html")
+            temp_file.deleteOnExit()  # Auto-cleanup when JVM exits
+            
+            # Write HTML to file using Java FileWriter for better compatibility
+            writer = None
+            try:
+                writer = FileWriter(temp_file)
+                writer.write(html_poc)
+                writer.flush()
+            finally:
+                if writer:
+                    writer.close()
+            
+            # Create file:/// URL
+            file_url = "file://" + temp_file.getAbsolutePath()
+            
+            # Copy file URL to clipboard
+            toolkit = Toolkit.getDefaultToolkit()
+            clipboard = toolkit.getSystemClipboard()
+            selection = StringSelection(file_url)
+            clipboard.setContents(selection, selection)
+            
+            print("[+] CSRF POC saved to: " + temp_file.getAbsolutePath())
+            print("[+] file:/// URL copied to clipboard!")
+            print("[+] Paste the URL into any browser to test the CSRF attack")
+            
+        except Exception as e:
+            print("[-] Error testing CSRF POC: " + str(e))
+            import traceback
+            traceback.print_exc()
+
     def convert_to_xml(self, invocation):
         """Convert request body to XML format"""
         try:
@@ -386,7 +965,12 @@ class BurpExtender(IBurpExtender, IContextMenuFactory):
             'cache-control', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 
             'upgrade-insecure-requests', 'accept-language', 'accept-encoding', 
             'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'sec-fetch-user',
-            'pragma', 'expires', 'last-modified', 'x-powered-by', 'x-aspnet-version'
+            'pragma', 'expires', 'last-modified', 'x-powered-by', 'x-aspnet-version',
+            # Security headers (often noise for sharing POCs unless the vulnerability is about them)
+            'content-security-policy', 'x-xss-protection', 'x-ua-compatible', 'referrer-policy',
+            'strict-transport-security', 'x-content-type-options',
+            # Proxy/CDN headers
+            'via', 'cf-cache-status', 'cf-ray'
         ]
         
         html = ["<html><head>" + STYLE + "</head><body>"]
@@ -587,8 +1171,21 @@ class BurpExtender(IBurpExtender, IContextMenuFactory):
         clipboard = toolkit.getSystemClipboard()
         clipboard.setContents(ImageTransferable(image), None)
 
+
     def _escape_html(self, text):
         return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _base64url_decode(self, data):
+        """Decode base64url encoded string (JWT uses this instead of standard base64)"""
+        # Add padding if needed
+        padding = 4 - (len(data) % 4)
+        if padding != 4:
+            data += '=' * padding
+        
+        # Replace URL-safe characters with standard base64
+        data = data.replace('-', '+').replace('_', '/')
+        
+        return base64.b64decode(data)
 
     # Helper methods
     
